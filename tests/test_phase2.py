@@ -75,17 +75,17 @@ def test_logit_dispersion_single_is_zero():
 
 
 def test_self_check_revises_and_is_measurable():
-    check = make_self_check(SchemaFakeLLM(values={"revised_prob": 0.55, "note": "n"}))
+    check = make_self_check(SchemaFakeLLM(values={"revised_prob": 0.4, "note": "n"}))
     pred = predict(
         market=Market(token_id="t123456789", question=Q, market_price=0.25,
                       resolution_date_iso="2026-12-31"),
         news=[], llms=[SchemaFakeLLM(values={"prob": 0.3})], as_of_date=date(2026, 7, 1),
         self_check=check,
     )
-    # self_check 把 raw 改到 0.55，delta 被记录且可度量
-    assert abs(pred.raw_prob - 0.55) < 1e-9
+    # self_check 把 raw 改到 0.4（幅度 ≤±0.15 不夹），delta 被记录且可度量
+    assert abs(pred.raw_prob - 0.4) < 1e-9
     assert pred.self_check_delta is not None
-    assert abs(pred.self_check_delta - (0.55 - 0.3)) < 1e-6
+    assert abs(pred.self_check_delta - (0.4 - 0.3)) < 1e-6
 
 
 def test_self_check_degrades_on_failure():
