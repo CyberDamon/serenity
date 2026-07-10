@@ -50,6 +50,7 @@ _EXPECTED_COLUMNS: dict[str, dict[str, str]] = {
         "placebo_delta_log_odds": "FLOAT",
         "belief_set_version": "VARCHAR(64)",
         "parse_errors": "TEXT",
+        "submit_reasoning": "TEXT",
     },
 }
 

@@ -350,3 +350,32 @@ def test_daily_meme_questions_skipped_without_gate_cost(tmpdb):
     from serenity.store.models import Prediction
     with session_scope() as s:
         assert s.query(Prediction).count() == 0  # 不落库
+
+
+def test_abstain_reasoning_carries_analyst_lens(tmpdb):
+    """风格迭代回归：先验弃权时 reasoning 须带先验层的领域自述，非通用套话。"""
+
+    class AbstainPriorLLM(PriorFakeLLM):
+        def complete(self, **kw):
+            from serenity.agent.llm_client import LLMResponse
+            return LLMResponse(text="", parsed_json={
+                "direction": "none", "strength": "none",
+                "rationale": "The beliefs focus on equity dilution mechanics and Fed liquidity, not manufacturing surveys",
+                "belief_ids": [],
+            }, model=self.model, cost_usd=0.0005)
+
+    from serenity.yarrow.runner import run_daily
+
+    _seed_belief_version()
+    fake = FakeYarrow([_q("q1", "Will the Fed cut rates in September 2026?")])
+    run_daily(client=fake, llms=[FrameworkFakeLLM("m1"), FrameworkFakeLLM("m2")],
+              gate_llm=GateFakeLLM(), prior_llm=AbstainPriorLLM(),
+              research=False, min_evidence=0, min_sources=0,
+              self_check=None, calibrator=lambda p: p)
+    from serenity.store.dao import session_scope
+    from serenity.store.models import Prediction
+    with session_scope() as s:
+        row = s.query(Prediction).filter_by(question_id="q1").one()
+        assert row.submit_reasoning  # 落库审计
+        assert "Analyst lens" in row.submit_reasoning
+        assert "equity dilution mechanics" in row.submit_reasoning  # 带真实拒答理由

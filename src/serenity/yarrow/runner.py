@@ -307,6 +307,7 @@ def run_daily(
 
         serenity_prob = apply_delta(generic_prob, prior.delta)
         placebo_prob = apply_delta(generic_prob, placebo.delta)
+        reasoning = _compose_reasoning(pred, prior, gate, serenity_prob, market_prob)
 
         skip_reason = _submission_gate(
             pred, q, now=now, min_lead_days=min_lead_days,
@@ -315,12 +316,12 @@ def run_daily(
         )
         if skip_reason is None:
             status = "dry_run" if not submit else "pending"
-            to_submit.append((q.id, serenity_prob, _compose_reasoning(pred, prior, gate, serenity_prob, market_prob)))
+            to_submit.append((q.id, serenity_prob, reasoning))
         else:
             status = "skipped"  # shadow：三臂照存
             result.skipped += 1
         _persist(q, today, gate, pred, prior, placebo, status, skip_reason, market_prob, version, now, rlog,
-                 serenity_prob=serenity_prob, placebo_prob=placebo_prob)
+                 serenity_prob=serenity_prob, placebo_prob=placebo_prob, reasoning=reasoning)
         result.items.append(RunItem(
             q.id, q.title, serenity_prob, status, skip_reason, gate.state,
             generic_prob=generic_prob, placebo_prob=placebo_prob,
@@ -468,6 +469,7 @@ def _persist(
     *,
     serenity_prob: float | None = None,
     placebo_prob: float | None = None,
+    reasoning: str | None = None,
 ) -> None:
     parse_errors: list[str] = []
     if gate.parse_error:
@@ -500,6 +502,7 @@ def _persist(
         row.belief_ids = json.dumps(prior.belief_ids) if prior else None
         row.prior_rationale = prior.rationale if prior else None
         row.parse_errors = json.dumps(parse_errors) if parse_errors else None
+        row.submit_reasoning = reasoning
         row.ir_std = pred.aggregated.ir_std if pred else None
         row.n_ir_valid = pred.aggregated.n_ir_valid if pred else None
         row.route_label = pred.route_label if pred else None
@@ -543,10 +546,20 @@ def _compose_reasoning(
             parts.append("Anchored on distilled theses:")
             parts.extend(f"- {c[:220]}" for c in claims[:4])
     else:
-        parts.append(
-            "Analyst belief base offers no directional edge on this question; "
-            "probability rests on the generic evidence-based estimate."
-        )
+        # 风格迭代（首条预测校验）：弃权也要带分析师视角——先验层给出的
+        # 拒答理由本身就是 Serenity 的领域自述（他关注什么、这题为何不在射程），
+        # 比通用套话更符合"信源"人格。仍是转述，不引原文。
+        no_edge = " ".join((prior.rationale or "").split())[:400]
+        if no_edge and not no_edge.startswith("fail-closed"):
+            parts.append(
+                f"Analyst lens: no directional edge here — {no_edge} "
+                "Probability rests on the generic evidence-based estimate."
+            )
+        else:
+            parts.append(
+                "Analyst belief base offers no directional edge on this question; "
+                "probability rests on the generic evidence-based estimate."
+            )
     if pred.reference_class_output and pred.reference_class_output.status == "ok":
         parts.append(
             f"Outside view anchor (reference class) = {pred.reference_class_output.prob:.3f}."

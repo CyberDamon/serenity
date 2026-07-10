@@ -68,6 +68,8 @@ class Prediction(Base):
     # ── 实验完整性（评审 3A/4A）──
     belief_set_version: Mapped[str | None] = mapped_column(String(64), default=None, index=True)
     parse_errors: Mapped[str | None] = mapped_column(Text, default=None)  # JSON list[str]，fail-closed 审计
+    # 提交给 Yarrow 的 report.reasoning 全文（审计 + 提交前风格校验）
+    submit_reasoning: Mapped[str | None] = mapped_column(Text, default=None)
 
     # 'submitted' | 'skipped'(shadow) | 'dry_run' | 'withdrawn' | 'failed' | 'pending'
     submit_status: Mapped[str] = mapped_column(String(16), default="dry_run", index=True)
