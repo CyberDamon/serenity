@@ -176,11 +176,36 @@ def clustered_bootstrap_ci(
     )
 
 
+def _count_incomplete_placebo(version: str | None) -> int:
+    """缺 placebo 的已结算行数（placebo 臂静默坏掉的哨兵，Codex 验收 F4）。"""
+    with session_scope() as s:
+        q = (
+            select(func.count()).select_from(Prediction)
+            .join(Resolution, Resolution.question_id == Prediction.question_id)
+            .where(Prediction.gate_state.in_(("in_domain", "adjacent")))
+            .where(Prediction.generic_prob.is_not(None))
+            .where(Prediction.final_prob.is_not(None))
+            .where(Prediction.placebo_prob.is_(None))
+            .where(Resolution.outcome.is_not(None))
+            .where(Resolution.is_void.is_(False))
+        )
+        if version:
+            q = q.where(Prediction.belief_set_version == version)
+        return int(s.execute(q).scalar_one())
+
+
 def paired_report(version: str | None = None, *, n_boot: int = 5000) -> PairedReport:
     rows = collect_paired_rows(version)
     rep = PairedReport(version=version, n_paired=len(rows))
+    # 残缺行诊断必须在空样本 early-return 之前跑——placebo 臂整体坏掉时
+    # 主总体恰好为空，告警正是此时最需要出现（Codex 二轮 F4）。
+    n_incomplete = _count_incomplete_placebo(version)
+    if n_incomplete:
+        rep.warnings.append(
+            f"⚠ {n_incomplete} 条已结算行缺 placebo 臂（被剔出主总体，查 placebo 是否坏掉）"
+        )
     if not rows:
-        rep.warnings.append("暂无已结算配对样本")
+        rep.warnings.append("暂无已结算配对样本（三臂齐口径）")
         return rep
 
     vocab = load_gate_vocab(version) if version else GateVocab(
@@ -202,24 +227,6 @@ def paired_report(version: str | None = None, *, n_boot: int = 5000) -> PairedRe
         for r in rows
     ]
     rep.vs_placebo = clustered_bootstrap_ci(d_pla, [r.cluster for r in rows], n_boot=n_boot)
-
-    # 诊断：缺 placebo 的残缺行计数（placebo 臂静默坏掉的哨兵，Codex 验收 F4）
-    with session_scope() as s:
-        incomplete_q = (
-            select(func.count()).select_from(Prediction)
-            .join(Resolution, Resolution.question_id == Prediction.question_id)
-            .where(Prediction.gate_state.in_(("in_domain", "adjacent")))
-            .where(Prediction.generic_prob.is_not(None))
-            .where(Prediction.final_prob.is_not(None))
-            .where(Prediction.placebo_prob.is_(None))
-            .where(Resolution.outcome.is_not(None))
-            .where(Resolution.is_void.is_(False))
-        )
-        if version:
-            incomplete_q = incomplete_q.where(Prediction.belief_set_version == version)
-        n_incomplete = int(s.execute(incomplete_q).scalar_one())
-    if n_incomplete:
-        rep.warnings.append(f"⚠ {n_incomplete} 条已结算行缺 placebo 臂（被剔出主总体，查 placebo 是否坏掉）")
 
     # 次指标：vs 提交时市场价（同版本过滤，Codex 验收 F10）
     with session_scope() as s:

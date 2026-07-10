@@ -144,3 +144,19 @@ def test_paired_report_end_to_end(tmpdb):
 def test_paired_report_empty(tmpdb):
     rep = paired_report("v1")
     assert rep.n_paired == 0 and rep.warnings
+
+
+def test_paired_report_warns_when_placebo_arm_dead(tmpdb):
+    """placebo 臂整体坏掉（主总体为空）时告警仍必须出现（Codex 二轮 F4）。"""
+    from serenity.store.dao import session_scope
+    from serenity.store.models import Prediction, Resolution
+
+    with session_scope() as s:
+        s.add(Prediction(question_id="q1", prediction_date="2026-07-05", title="t",
+                         gate_state="in_domain", generic_prob=0.5, final_prob=0.6,
+                         placebo_prob=None, belief_set_version="v1",
+                         submit_status="submitted"))
+        s.add(Resolution(question_id="q1", resolution_kind="yes", outcome=1.0))
+    rep = paired_report("v1", n_boot=50)
+    assert rep.n_paired == 0
+    assert any("缺 placebo 臂" in w for w in rep.warnings)

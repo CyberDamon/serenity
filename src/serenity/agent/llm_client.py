@@ -624,17 +624,19 @@ class OpenAIClient:
         self._api_key = settings.openai_api_key.get_secret_value() if api_key is None else api_key
         self._cost_tracker = get_cost_tracker()
         self._client = None
+        self._init_lock = threading.Lock()  # Codex 验收 F7（三个 client 同构）
 
     def _ensure_client(self):
-        if self._client is None:
-            try:
-                from openai import OpenAI
-            except ImportError as e:
-                raise LLMFatalError("openai SDK not installed; pip install openai") from e
-            if not self._api_key:
-                raise LLMFatalError("OPENAI_API_KEY not set")
-            self._client = OpenAI(api_key=self._api_key, timeout=_LLM_TIMEOUT_S, max_retries=0)
-        return self._client
+        with self._init_lock:
+            if self._client is None:
+                try:
+                    from openai import OpenAI
+                except ImportError as e:
+                    raise LLMFatalError("openai SDK not installed; pip install openai") from e
+                if not self._api_key:
+                    raise LLMFatalError("OPENAI_API_KEY not set")
+                self._client = OpenAI(api_key=self._api_key, timeout=_LLM_TIMEOUT_S, max_retries=0)
+            return self._client
 
     @property
     def training_cutoff(self) -> date:
@@ -658,7 +660,27 @@ class OpenAIClient:
     ) -> LLMResponse:
         estimated = estimate_cost(self.model, estimated_input_tokens, estimated_output_tokens)
         self._cost_tracker.reserve(estimated)
+        # 预留后任何失败路径退款（Codex 验收 F8，三个 client 同构）
+        try:
+            return self._complete_reserved(
+                system=system, user=user, max_tokens=max_tokens,
+                response_schema=response_schema, estimated=estimated,
+            )
+        except CostCapExceeded:
+            raise
+        except Exception:
+            self._cost_tracker.record(-estimated)
+            raise
 
+    def _complete_reserved(
+        self,
+        *,
+        system: str,
+        user: str,
+        max_tokens: int,
+        response_schema: dict | None,
+        estimated: float,
+    ) -> LLMResponse:
         client = self._ensure_client()
         # GPT-5 / o-series are reasoning models: an undisclosed chunk of the
         # token budget goes to internal reasoning before any visible output
