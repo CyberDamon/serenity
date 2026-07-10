@@ -1,0 +1,11 @@
+{
+  "method": "identity",
+  "version": 0,
+  "platt_a": 1.0,
+  "platt_b": 0.0,
+  "iso_x": [],
+  "iso_y": [],
+  "n_train": 0,
+  "holdout_brier_identity": null,
+  "holdout_brier_model": null
+}
