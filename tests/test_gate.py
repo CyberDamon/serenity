@@ -137,3 +137,29 @@ def test_load_gate_vocab_from_belief_tables(tmpdb):
 def test_gate_result_dataclass_defaults():
     g = GateResult(state="in_domain", rationale="r")
     assert g.parse_error is None and g.matched_terms == []
+
+
+def test_rule_common_word_ticker_requires_uppercase(tmpdb):
+    """QA ISSUE-003 回归：合法 ticker 撞英文常用词（BE/OPEN）不得小写误触发。"""
+    vocab = GateVocab(tickers={"BE", "OPEN", "NVDA"}, domains=set())
+    llm = _ScriptedGateLLM({"state": "out_of_domain", "rationale": "podcast word mention, unrelated"})
+    g = classify_question(
+        title='Will "Think" be said during the next episode of the Podcast?',
+        deadline=None, vocab=vocab, llm=llm,
+    )
+    assert g.state == "out_of_domain"  # 小写 be 不触发
+    g2 = classify_question(title="Will BE stock double by 2027?",
+                           deadline=None, vocab=vocab, llm=_NeverCalledLLM())
+    assert g2.state == "in_domain" and "BE" in g2.matched_terms  # 大写全词才触发
+
+
+def test_rule_keyword_word_boundary(tmpdb):
+    """QA ISSUE-003 回归：'nand' 不得子串命中 'Hernandez'。"""
+    vocab = GateVocab(tickers=set(), domains={"memory_hbm_nand"})
+    llm = _ScriptedGateLLM({"state": "out_of_domain", "rationale": "US House election, unrelated"})
+    g = classify_question(title="Will Melissa Hernandez win the CA-14 House seat?",
+                          deadline=None, vocab=vocab, llm=llm)
+    assert g.state == "out_of_domain"
+    g2 = classify_question(title="Will NAND flash prices rise 30% by December?",
+                           deadline=None, vocab=vocab, llm=_NeverCalledLLM())
+    assert g2.state == "in_domain"

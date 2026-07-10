@@ -37,13 +37,13 @@ from serenity.store.models import BeliefPrimitive, TickerKnowledge
 
 log = logging.getLogger(__name__)
 
-# domain 词表：domain 标签 → 题目文本里的可匹配关键词（小写）。
+# domain 词表：domain 标签 → 题目文本里的可匹配关键词（小写，词边界匹配）。
 # 与 distill.prompts.DOMAINS 对应；只放高精度词，宁漏勿滥（漏的交给 LLM 层）。
 _DOMAIN_KEYWORDS: dict[str, list[str]] = {
     "optics_cpo": ["optical transceiver", "co-packaged optics", "cpo", "photonics",
                    "800g", "1.6t", "optical interconnect"],
     "inp_compound_semis": ["inp", "indium phosphide", "compound semiconductor", "gaas",
-                           "silicon carbide", "gan "],
+                           "silicon carbide", "gan"],
     "memory_hbm_nand": ["hbm", "high bandwidth memory", "nand", "dram", "memory chip"],
     "neocloud_financing": ["neocloud", "coreweave", "gpu cloud", "ai cloud provider"],
     "ai_power_grid": ["data center power", "datacenter power", "grid", "power demand",
@@ -52,11 +52,28 @@ _DOMAIN_KEYWORDS: dict[str, list[str]] = {
     "semis_supply_chain": ["semiconductor", "chip fab", "foundry", "wafer", "capex",
                            "tsmc", "lithography", "euv", "chip export", "export control"],
     "ai_models_labs": ["openai", "anthropic", "gpt-", "claude", "gemini", "frontier model",
-                       "ai model", "llm", "artificial intelligence", " agi"],
+                       "ai model", "llm", "artificial intelligence", "agi"],
     "macro_market": [],  # 宏观词不做规则直判（太宽，交给 LLM 层判 adjacent）
 }
 
 _WORD_RE = re.compile(r"[a-z0-9][a-z0-9.\-]*")
+_UPPER_WORD_RE = re.compile(r"[A-Z][A-Z0-9.\-]*")
+
+
+def _kw_pattern(kw: str) -> re.Pattern[str]:
+    """关键词 → 词边界正则（QA ISSUE-003：子串匹配把 'nand' 打进 'Hernandez'）。
+
+    末尾为 '-' 的前缀词（如 'gpt-'）只锚定起始边界。
+    """
+    esc = re.escape(kw)
+    tail = "" if kw.endswith("-") else r"\b"
+    return re.compile(rf"\b{esc}{tail}")
+
+
+_KW_PATTERNS: dict[str, list[tuple[str, re.Pattern[str]]]] = {
+    domain: [(kw, _kw_pattern(kw)) for kw in kws]
+    for domain, kws in _DOMAIN_KEYWORDS.items()
+}
 
 
 @dataclass
@@ -96,18 +113,24 @@ class GateResult:
 
 
 def _rule_match(title: str, vocab: GateVocab) -> tuple[list[str], list[str]]:
-    """返回 (命中的 ticker, 命中的 domain 关键词)。"""
-    low = f" {title.lower()} "
-    words = set(_WORD_RE.findall(low))
+    """返回 (命中的 ticker, 命中的 domain 关键词)。
+
+    QA ISSUE-003 两条铁律：
+      - ticker 必须以**大写全词**出现在原始标题（题目提 ticker 从来是大写；
+        否则 BE/OPEN/ALL 这类合法 ticker 会撞英文常用词误触发 in_domain）。
+      - domain 关键词用词边界正则（子串匹配曾把 'nand' 打进 'Hernandez'）。
+    规则层宁漏勿滥——漏的交给 LLM 层裁 adjacent/out。
+    """
+    upper_words = set(_UPPER_WORD_RE.findall(title))
     hit_tickers = sorted(
-        t for t in vocab.tickers
-        if len(t) >= 2 and t.lower() in words  # 全词匹配防 "A"/"AI" 之类误击
+        t for t in vocab.tickers if len(t) >= 2 and t in upper_words
     )
+    low = title.lower()
     hit_kw: list[str] = []
-    for domain in vocab.domains or set(_DOMAIN_KEYWORDS):
-        for kw in _DOMAIN_KEYWORDS.get(domain, []):
-            if kw in low:
-                hit_kw.append(f"{domain}:{kw.strip()}")
+    for domain in vocab.domains or set(_KW_PATTERNS):
+        for kw, pat in _KW_PATTERNS.get(domain, []):
+            if pat.search(low):
+                hit_kw.append(f"{domain}:{kw}")
     return hit_tickers, hit_kw
 
 
