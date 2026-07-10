@@ -29,8 +29,10 @@ class Settings(BaseSettings):
     yarrow_wallet_address: str = Field(default="")
     # 仅一次性 SIWE bootstrap 用；长跑 daemon 应留空并只用 api key。
     yarrow_private_key: SecretStr = Field(default=SecretStr(""))
-    # serenity 扫全类别（空 = 不按类别过滤），领域归属由三态闸门判定。
-    yarrow_categories: str = Field(default="")
+    # 定向类别循环扫描（QA ISSUE-002）：Yarrow 全局题流被体育/加密梗题刷屏，
+    # 真题聚在这些类别里（finance 含财报电话会题——Serenity 相邻领域）。
+    # 空 = 全局扫（兜底）。
+    yarrow_categories: str = Field(default="finance,tech,politics")
     yarrow_max_questions_per_run: int = Field(default=10)
 
     # ── serenity 信念先验（设计文档定稿参数；实验期冻结，改 = 新实验段，评审 7A）──

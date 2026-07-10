@@ -185,16 +185,36 @@ def _cmd_inventory(args: argparse.Namespace) -> int:
     client = YarrowClient()
     now = datetime.now(UTC)
 
+    from serenity.yarrow.runner import _MEME_MARKET_RE
+
+    categories = ([c.strip() for c in settings.yarrow_categories.split(",") if c.strip()]
+                  if settings.yarrow_categories else [None])
+    per_cat = max(10, args.max_scan // len(categories))
     states: Counter[str] = Counter()
     cats: Counter[str] = Counter()
     horizons: Counter[str] = Counter()
     samples: dict[str, list[str]] = {"in_domain": [], "adjacent": []}
     cost = 0.0
     n = 0
-    for q in client.iter_questions(status="open", qtype="binary"):
+    n_meme = 0
+    scan_items = []
+    for category in categories:
+        cn = 0
+        for q in client.iter_questions(status="open", qtype="binary", category=category):
+            cn += 1
+            if cn > per_cat:
+                break
+            scan_items.append(q)
+    seen_ids = set()
+    for q in scan_items:
+        if q.id in seen_ids:
+            continue
+        seen_ids.add(q.id)
         n += 1
-        if n > args.max_scan:
-            break
+        if _MEME_MARKET_RE.search(q.title or ""):
+            n_meme += 1
+            states["meme_prefiltered"] += 1
+            continue
         g = classify_question(title=q.title, deadline=q.scheduled_resolve_time,
                               vocab=vocab, llm=gate_llm)
         cost += g.cost_usd
@@ -209,8 +229,9 @@ def _cmd_inventory(args: argparse.Namespace) -> int:
                 bucket = "<7d" if days < 7 else "<30d" if days < 30 else "<90d" if days < 90 else "90d+"
                 horizons[bucket] += 1
     total = sum(states.values())
-    print(f"[inventory] 扫描 {total} 条 open binary（gate 成本 ${cost:.2f}）")
-    for st in ("in_domain", "adjacent", "out_of_domain"):
+    print(f"[inventory] 扫描 {total} 条 open binary（类别: {','.join(c or 'all' for c in categories)}；"
+          f"梗题预过滤 {n_meme} 条；gate 成本 ${cost:.2f}）")
+    for st in ("in_domain", "adjacent", "out_of_domain", "meme_prefiltered"):
         c = states.get(st, 0)
         print(f"  {st:14} {c:4}  ({c / max(1, total):5.1%})")
     print(f"  对口题类别分布: {dict(cats)}")
