@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+*.db
+.env
+.DS_Store
+
+# 推文原文语料一律不进 repo（评审 9A：X 内容再分发合规）。
+# 语料本地 clone 到 ~/corpora/；蒸馏产物（转述信念三表）在状态库里随 repo 走。
+data/*.json
+data/*.csv
+corpora/
+
+# GitHub Actions 持久化的状态库（跨运行保留，供 reconcile/calibrate/信念库前向闭环）
+!state/serenity.db
+.gstack/

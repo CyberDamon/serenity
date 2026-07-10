@@ -1,0 +1,79 @@
+name: serenity daily
+
+# 每日定时：三臂预测（generic/placebo/serenity）+ 提交 → reconcile → calibrate
+# 信念库（蒸馏产物三表）在 state/serenity.db 里随 repo 走；蒸馏本地跑（distill）。
+# 状态库 state/serenity.db 提交回 repo，供跨运行的前向闭环（reconcile/calibrate）。
+# 推上 GitHub + 配好 secrets（见 README「GitHub Actions 定时任务」）即自动运行。
+
+on:
+  schedule:
+    - cron: "0 23 * * *"   # 每天 23:00 UTC = 北京时间次日 07:00
+  workflow_dispatch:
+    inputs:
+      max:
+        description: "本轮要凑够的 in_domain/adjacent 候选题数（闸门自动过滤，非原始拉取数）"
+        required: false
+        default: "10"
+      submit:
+        description: "是否真实提交（false 则 dry-run）"
+        required: false
+        default: "true"
+
+# 串行化，避免两次运行同时写状态库导致冲突
+concurrency:
+  group: serenity-daily
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # 需要把状态库 commit 回 repo
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330   # 15 题 × 多次 LLM 调用可能较久
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Predict + submit + reconcile + calibrate
+        env:
+          NEW_API_KEY: ${{ secrets.NEW_API_KEY }}
+          YARROW_API_KEY: ${{ secrets.YARROW_API_KEY }}
+          # 主动 agentic 检索后端（L2，主）；免费/无硬限流。未配则 research 自动降级 RSS。
+          SEARX_BASE_URL: ${{ secrets.SEARX_BASE_URL || 'https://api.yarrowlab.ai' }}
+          SEARX_TOKEN: ${{ secrets.SEARX_TOKEN }}
+          # 备用：Tavily 套餐用量超限会 432 fail-closed（2026-07-03~07 曾致连续 0 提交），已降级为非默认路径
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          # 正式后端（settings 默认已是 api.yarrowlab.ai，可用 secret 覆盖）
+          YARROW_BASE_URL: ${{ secrets.YARROW_BASE_URL || 'https://api.yarrowlab.ai' }}
+          DATABASE_URL: "sqlite:///state/serenity.db"
+          GW_MAX: ${{ github.event.inputs.max || '10' }}
+          GW_SUBMIT: ${{ github.event.inputs.submit || 'true' }}
+        run: |
+          mkdir -p state
+          if [ "$GW_SUBMIT" = "true" ]; then SUB="--submit"; else SUB=""; fi
+          serenity daily $SUB --max "$GW_MAX" --min-lead-days 1
+          serenity reconcile
+          serenity calibrate
+
+      - name: Commit state back
+        if: always()   # 即便预测部分失败，也保存已产生的状态
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add -f state/serenity.db calibrator.json 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "无状态变化，跳过提交"
+          else
+            git commit -m "chore: serenity 状态更新 $(date -u +%F) [skip ci]"
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+            git push origin "HEAD:${GITHUB_REF_NAME}" || echo "push 失败（检查 permissions: contents write）"
+          fi

@@ -1,0 +1,44 @@
+[project]
+name = "serenity"
+version = "0.0.1"
+description = "Belief-distilled forecasting agent for Yarrow: X-account persona prior (three-arm experiment: generic/placebo/serenity)."
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "eth-account>=0.11",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "sqlalchemy>=2.0",
+    "tenacity>=8.2",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "feedparser>=6.0",
+    # LLM providers (Phase 1+; Phase 0 does not import these)
+    "anthropic>=0.39",
+    "openai>=1.40",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-httpx>=0.30",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+serenity = "serenity.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/serenity"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
