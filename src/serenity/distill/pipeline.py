@@ -208,7 +208,9 @@ def compute_version(beliefs: list[dict]) -> str:
 
 
 def paired_sample_count(version: str) -> int:
-    """当前版本下已结算的配对样本数（gate∈{in,adjacent} 且三臂齐 且有真值）。"""
+    """当前版本下已结算的**三臂齐**配对样本数（Codex 验收 F3）：
+    gate∈{in,adjacent} + generic/serenity/placebo 三值齐 + 非 void 真值。
+    守卫口径必须与主指标口径一致，否则会提前解锁重建。"""
     with session_scope() as s:
         n = s.execute(
             select(func.count())
@@ -218,7 +220,9 @@ def paired_sample_count(version: str) -> int:
             .where(Prediction.gate_state.in_(("in_domain", "adjacent")))
             .where(Prediction.generic_prob.is_not(None))
             .where(Prediction.final_prob.is_not(None))
+            .where(Prediction.placebo_prob.is_not(None))
             .where(Resolution.outcome.is_not(None))
+            .where(Resolution.is_void.is_(False))
         ).scalar_one()
     return int(n)
 

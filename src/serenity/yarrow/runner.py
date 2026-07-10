@@ -115,9 +115,23 @@ def run_daily(
     version = active_version()
     if not version:
         raise RuntimeError("无激活信念库版本——先跑 `serenity distill`（评审 3A：先验臂依赖冻结版本）")
+    # v1 实验冻结守卫（Codex 验收 F2）：缩放系数固定 1.0，env 改动会静默改变处理强度。
+    if abs(settings.prior_scale - 1.0) > 1e-9:
+        raise RuntimeError(
+            f"v1 实验期 prior_scale 固定 1.0（评审 8A），当前={settings.prior_scale}。"
+            "启用缩放属 v2 变更 = 新实验段。"
+        )
 
     client = client or YarrowClient()
-    llms = llms or _build_llms()
+    if llms is None:
+        llms = _build_llms()
+        # 对照臂定义冻结（Codex 验收 F6）：generic 臂 = 恰好双模型；
+        # 配置漂移会静默改变对照组强度。显式传 llms（测试/实验脚本）不受限。
+        if len(llms) != 2:
+            raise RuntimeError(
+                f"generic 对照臂要求恰好 2 个 ensemble 模型（评审 1A），"
+                f"当前 ENSEMBLE_MODELS 给了 {len(llms)} 个。"
+            )
     gate_llm = gate_llm or make_client(settings.gate_model)
     prior_llm = prior_llm or make_client(settings.prior_model)
     aux_llm = llms[0]
@@ -309,6 +323,10 @@ def _submission_gate(
     min_sources: int,
     logit_dispersion_max: float,
 ) -> str | None:
+    """设计文档提交规则③"generic 管线自检通过（沿 green-water 自检门控）"= 本函数整套：
+    污染过滤 / 双模型存活 / logit 分歧 / 证据质量 / 最小提前量。这些是质量与反作弊门，
+    不是"置信度/edge 过滤"（后者被设计明令禁止——那会给配对样本引入选择偏差；
+    本门被跳过的题三臂照常 shadow 落库，配对分析不受影响）。"""
     agg = pred.aggregated
     if agg.contamination_filter_triggered:
         return "aggregator_contamination"
@@ -522,23 +540,42 @@ def _submit(
     result: RunResult,
     now: datetime,
 ) -> None:
+    """逐 chunk 提交，单 chunk 失败不拖垮后续（Codex 验收 F5）：
+    失败 chunk 的行标 submit_status='failed' + skip_reason='submit_error'，
+    绝不留假 'pending'（假 pending 会被 3 天去重挡住重试、又进不了 reconcile）。"""
     for i in range(0, len(to_submit), FORECAST_BATCH_MAX):
         chunk = to_submit[i : i + FORECAST_BATCH_MAX]
+        chunk_ids = {qid for qid, _p, _r in chunk}
         payload = [
             {"question_id": qid, "probability_yes": p, "report": {"reasoning": reasoning}}
             for qid, p, reasoning in chunk
         ]
-        client.submit_forecasts(payload)
-        chunk_ids = {qid for qid, _p, _r in chunk}
-        with session_scope() as s:
-            for qid in chunk_ids:
-                row = s.query(Prediction).filter_by(question_id=qid).order_by(
-                    Prediction.id.desc()
-                ).first()
-                if row:
-                    row.submit_status = "submitted"
-                    row.first_submit_ts = row.first_submit_ts or now
-        for item in result.items:
-            if item.question_id in chunk_ids:
-                item.submit_status = "submitted"
+        try:
+            client.submit_forecasts(payload)
+        except Exception as e:
+            log.error("submit chunk failed (%d 条): %s", len(chunk), e)
+            _mark_chunk(chunk_ids, "failed", f"submit_error:{type(e).__name__}", result, now)
+            continue
+        _mark_chunk(chunk_ids, "submitted", None, result, now)
         result.submitted += len(chunk)
+
+
+def _mark_chunk(
+    chunk_ids: set[str], status: str, skip_reason: str | None,
+    result: RunResult, now: datetime,
+) -> None:
+    with session_scope() as s:
+        for qid in chunk_ids:
+            row = s.query(Prediction).filter_by(question_id=qid).order_by(
+                Prediction.id.desc()
+            ).first()
+            if row:
+                row.submit_status = status
+                row.skip_reason = skip_reason or row.skip_reason
+                if status == "submitted":
+                    row.first_submit_ts = row.first_submit_ts or now
+    for item in result.items:
+        if item.question_id in chunk_ids:
+            item.submit_status = status
+            if skip_reason:
+                item.skip_reason = skip_reason

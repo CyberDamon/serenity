@@ -67,6 +67,17 @@ jobs:
       - name: Commit state back
         if: always()   # 即便预测部分失败，也保存已产生的状态
         run: |
+          # 守卫（Codex 验收 F9）：状态库必须仍含激活信念库版本才允许 commit，
+          # 防止 daily 早期失败时把空/无信念库的 db 覆盖掉已蒸馏的状态。
+          if ! python -c "
+          import sqlite3, sys
+          con = sqlite3.connect('state/serenity.db')
+          n = con.execute('SELECT COUNT(*) FROM belief_set_meta WHERE active=1').fetchone()[0]
+          sys.exit(0 if n >= 1 else 1)
+          " 2>/dev/null; then
+            echo '状态库无激活信念库版本——拒绝 commit（防覆盖已蒸馏状态）'
+            exit 0
+          fi
           git config user.name  'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
           git add -f state/serenity.db calibrator.json 2>/dev/null || true

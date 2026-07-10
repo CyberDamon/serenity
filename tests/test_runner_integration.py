@@ -270,3 +270,41 @@ def test_daily_llm_gateway_down_isolates_question(tmpdb):
     with session_scope() as s:
         row = s.query(Prediction).filter_by(question_id="q1").one()
         assert row.submit_status in ("skipped", "failed")
+
+
+def test_daily_submit_failure_marks_failed_not_pending(tmpdb):
+    """提交失败 → 行标 failed+submit_error，绝不留假 pending（Codex 验收 F5）。"""
+
+    class FailingYarrow(FakeYarrow):
+        def submit_forecasts(self, payload):
+            raise RuntimeError("backend 503")
+
+    from serenity.yarrow.runner import run_daily
+
+    _seed_belief_version()
+    fake = FailingYarrow([_q("q1", "Will NVDA ship GB300 racks in volume by Q4 2026?")])
+    res = run_daily(client=fake, llms=[FrameworkFakeLLM("m1", 0.4), FrameworkFakeLLM("m2", 0.4)],
+                    gate_llm=GateFakeLLM(), prior_llm=PriorFakeLLM(),
+                    submit=True, research=False, min_evidence=0, min_sources=0,
+                    self_check=None, calibrator=lambda p: p)
+    assert res.submitted == 0
+    from serenity.store.dao import session_scope
+    from serenity.store.models import Prediction
+    with session_scope() as s:
+        row = s.query(Prediction).filter_by(question_id="q1").one()
+        assert row.submit_status == "failed"
+        assert row.skip_reason and row.skip_reason.startswith("submit_error")
+
+
+def test_daily_rejects_nondefault_prior_scale(tmpdb, monkeypatch):
+    """v1 实验冻结：prior_scale ≠ 1.0 拒跑（Codex 验收 F2）。"""
+    from serenity.config import settings
+    from serenity.yarrow.runner import run_daily
+
+    _seed_belief_version()
+    monkeypatch.setattr(settings, "prior_scale", 0.8)
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="prior_scale"):
+        run_daily(client=FakeYarrow([]), llms=[FrameworkFakeLLM("m1")],
+                  gate_llm=GateFakeLLM(), prior_llm=PriorFakeLLM(),
+                  self_check=None, calibrator=lambda p: p, research=False)

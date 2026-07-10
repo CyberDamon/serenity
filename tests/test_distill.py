@@ -172,8 +172,8 @@ def _seed_version(version="v1abc", with_forecast=False, resolved=False):
         if with_forecast:
             s.add(Prediction(
                 question_id="q1", prediction_date="2026-07-02", gate_state="in_domain",
-                generic_prob=0.4, final_prob=0.5, belief_set_version=version,
-                submit_status="submitted",
+                generic_prob=0.4, final_prob=0.5, placebo_prob=0.4,
+                belief_set_version=version, submit_status="submitted",
             ))
             if resolved:
                 s.add(Resolution(question_id="q1", resolution_kind="yes", outcome=1.0))
@@ -205,3 +205,30 @@ def test_rebuild_guard_allows_after_experiment_full(tmpdb, monkeypatch):
     _seed_version(with_forecast=True, resolved=True)
     monkeypatch.setattr(settings, "experiment_min_paired", 1)  # 1 条即满
     assert rebuild_guard(force=False) is None
+
+
+def test_paired_sample_count_requires_three_arms_and_nonvoid(tmpdb):
+    """守卫口径 = 主指标口径（Codex 验收 F3）：缺 placebo 或 void 不计数。"""
+    from datetime import datetime
+
+    from serenity.distill.pipeline import paired_sample_count
+    from serenity.store.dao import session_scope
+    from serenity.store.models import BeliefSetMeta, Prediction, Resolution
+
+    with session_scope() as s:
+        s.add(BeliefSetMeta(version="v1", created_at=datetime(2026, 7, 1), active=True))
+        # 三臂齐 + 非 void → 计数
+        s.add(Prediction(question_id="ok", prediction_date="2026-07-02", gate_state="in_domain",
+                         generic_prob=0.4, final_prob=0.5, placebo_prob=0.4,
+                         belief_set_version="v1"))
+        s.add(Resolution(question_id="ok", resolution_kind="yes", outcome=1.0))
+        # 缺 placebo → 不计
+        s.add(Prediction(question_id="nop", prediction_date="2026-07-02", gate_state="in_domain",
+                         generic_prob=0.4, final_prob=0.5, belief_set_version="v1"))
+        s.add(Resolution(question_id="nop", resolution_kind="yes", outcome=1.0))
+        # void → 不计
+        s.add(Prediction(question_id="vd", prediction_date="2026-07-02", gate_state="in_domain",
+                         generic_prob=0.4, final_prob=0.5, placebo_prob=0.4,
+                         belief_set_version="v1"))
+        s.add(Resolution(question_id="vd", resolution_kind="void", outcome=0.5, is_void=True))
+    assert paired_sample_count("v1") == 1

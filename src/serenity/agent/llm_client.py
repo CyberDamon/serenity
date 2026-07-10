@@ -364,17 +364,19 @@ class NewAPIClient:
         self._base_url = (base_url.rstrip("/") if base_url else _new_api_base_url())
         self._cost_tracker = get_cost_tracker()
         self._client = None
+        self._init_lock = threading.Lock()  # 题级并发下懒初始化须加锁（Codex 验收 F7）
 
     def _ensure_client(self):
-        if self._client is None:
-            try:
-                from openai import OpenAI
-            except ImportError as e:
-                raise LLMFatalError("openai SDK not installed; pip install openai") from e
-            if not self._api_key:
-                raise LLMFatalError("NEW_API_KEY not set")
-            self._client = OpenAI(api_key=self._api_key, base_url=self._base_url, timeout=_LLM_TIMEOUT_S, max_retries=0)
-        return self._client
+        with self._init_lock:
+            if self._client is None:
+                try:
+                    from openai import OpenAI
+                except ImportError as e:
+                    raise LLMFatalError("openai SDK not installed; pip install openai") from e
+                if not self._api_key:
+                    raise LLMFatalError("NEW_API_KEY not set")
+                self._client = OpenAI(api_key=self._api_key, base_url=self._base_url, timeout=_LLM_TIMEOUT_S, max_retries=0)
+            return self._client
 
     @property
     def training_cutoff(self) -> date:
@@ -398,7 +400,28 @@ class NewAPIClient:
     ) -> LLMResponse:
         estimated = estimate_cost(self.model, estimated_input_tokens, estimated_output_tokens)
         self._cost_tracker.reserve(estimated)
+        # 预留后任何失败路径退款（Codex 验收 F8）：否则失败也记假花费，
+        # 且 tenacity 重试会按次数重复预留，提前触顶 cost cap。
+        try:
+            return self._complete_reserved(
+                system=system, user=user, max_tokens=max_tokens,
+                response_schema=response_schema, estimated=estimated,
+            )
+        except CostCapExceeded:
+            raise
+        except Exception:
+            self._cost_tracker.record(-estimated)
+            raise
 
+    def _complete_reserved(
+        self,
+        *,
+        system: str,
+        user: str,
+        max_tokens: int,
+        response_schema: dict | None,
+        estimated: float,
+    ) -> LLMResponse:
         client = self._ensure_client()
         is_reasoning = self.model.startswith(("gpt-5", "claude-opus-4"))
         effective_max_tokens = max_tokens * 4 if is_reasoning else max_tokens
@@ -468,17 +491,19 @@ class AnthropicClient:
         self._api_key = settings.anthropic_api_key.get_secret_value() if api_key is None else api_key
         self._cost_tracker = get_cost_tracker()
         self._client = None  # lazy init so tests can mock without API key
+        self._init_lock = threading.Lock()  # Codex 验收 F7
 
     def _ensure_client(self):
-        if self._client is None:
-            try:
-                from anthropic import Anthropic  # lazy import
-            except ImportError as e:
-                raise LLMFatalError("anthropic SDK not installed; pip install anthropic") from e
-            if not self._api_key:
-                raise LLMFatalError("ANTHROPIC_API_KEY not set")
-            self._client = Anthropic(api_key=self._api_key, timeout=_LLM_TIMEOUT_S, max_retries=0)
-        return self._client
+        with self._init_lock:
+            if self._client is None:
+                try:
+                    from anthropic import Anthropic  # lazy import
+                except ImportError as e:
+                    raise LLMFatalError("anthropic SDK not installed; pip install anthropic") from e
+                if not self._api_key:
+                    raise LLMFatalError("ANTHROPIC_API_KEY not set")
+                self._client = Anthropic(api_key=self._api_key, timeout=_LLM_TIMEOUT_S, max_retries=0)
+            return self._client
 
     @property
     def training_cutoff(self) -> date:
@@ -503,7 +528,27 @@ class AnthropicClient:
         # Budget check first — saves API call when capped
         estimated = estimate_cost(self.model, estimated_input_tokens, estimated_output_tokens)
         self._cost_tracker.reserve(estimated)
+        # 预留后任何失败路径退款（Codex 验收 F8，与 NewAPIClient 同构）
+        try:
+            return self._complete_reserved(
+                system=system, user=user, max_tokens=max_tokens,
+                response_schema=response_schema, estimated=estimated,
+            )
+        except CostCapExceeded:
+            raise
+        except Exception:
+            self._cost_tracker.record(-estimated)
+            raise
 
+    def _complete_reserved(
+        self,
+        *,
+        system: str,
+        user: str,
+        max_tokens: int,
+        response_schema: dict | None,
+        estimated: float,
+    ) -> LLMResponse:
         client = self._ensure_client()
 
         # claude-opus-4-x 是 extended thinking 模型，内部推理会消耗大量 token。

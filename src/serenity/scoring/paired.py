@@ -21,7 +21,7 @@ import random
 import re
 from dataclasses import dataclass, field
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from serenity.gate.gate import _DOMAIN_KEYWORDS, GateVocab, _rule_match, load_gate_vocab
 from serenity.store.dao import init_db, session_scope
@@ -98,7 +98,9 @@ def cluster_key(title: str, month: str, vocab: GateVocab) -> str:
 
 
 def collect_paired_rows(version: str | None = None) -> list[PairedRow]:
-    """拉已结算的三臂配对样本（gate∈{in,adjacent}；placebo 可缺，主对比不受影响）。"""
+    """拉已结算的**三臂齐**配对样本（Codex 验收 F4）：主配对总体要求
+    generic/serenity/placebo 三值都在——缺 placebo 的行剔出主总体
+    （单独计数进 report.warnings，防 placebo 臂静默坏掉被均值掩盖）。"""
     init_db()
     with session_scope() as s:
         q = (
@@ -107,6 +109,7 @@ def collect_paired_rows(version: str | None = None) -> list[PairedRow]:
             .where(Prediction.gate_state.in_(("in_domain", "adjacent")))
             .where(Prediction.generic_prob.is_not(None))
             .where(Prediction.final_prob.is_not(None))
+            .where(Prediction.placebo_prob.is_not(None))
             .where(Resolution.outcome.is_not(None))
             .where(Resolution.is_void.is_(False))
         )
@@ -192,29 +195,45 @@ def paired_report(version: str | None = None, *, n_boot: int = 5000) -> PairedRe
     d_gen = [brier(r.serenity_prob, r.outcome) - brier(r.generic_prob, r.outcome) for r in rows]
     rep.vs_generic = clustered_bootstrap_ci(d_gen, [r.cluster for r in rows], n_boot=n_boot)
 
-    with_placebo = [r for r in rows if r.placebo_prob is not None]
-    if with_placebo:
-        rep.brier_placebo = sum(brier(r.placebo_prob, r.outcome) for r in with_placebo) / len(with_placebo)
-        d_pla = [
-            brier(r.serenity_prob, r.outcome) - brier(r.placebo_prob, r.outcome)
-            for r in with_placebo
-        ]
-        rep.vs_placebo = clustered_bootstrap_ci(
-            d_pla, [r.cluster for r in with_placebo], n_boot=n_boot
-        )
-    else:
-        rep.warnings.append("无 placebo 臂样本（旧数据？）")
+    # 主总体已保证三臂齐（collect_paired_rows），placebo 直接算
+    rep.brier_placebo = sum(brier(r.placebo_prob, r.outcome) for r in rows) / len(rows)
+    d_pla = [
+        brier(r.serenity_prob, r.outcome) - brier(r.placebo_prob, r.outcome)
+        for r in rows
+    ]
+    rep.vs_placebo = clustered_bootstrap_ci(d_pla, [r.cluster for r in rows], n_boot=n_boot)
 
-    # 次指标：vs 提交时市场价
+    # 诊断：缺 placebo 的残缺行计数（placebo 臂静默坏掉的哨兵，Codex 验收 F4）
     with session_scope() as s:
-        mrows = s.execute(
+        incomplete_q = (
+            select(func.count()).select_from(Prediction)
+            .join(Resolution, Resolution.question_id == Prediction.question_id)
+            .where(Prediction.gate_state.in_(("in_domain", "adjacent")))
+            .where(Prediction.generic_prob.is_not(None))
+            .where(Prediction.final_prob.is_not(None))
+            .where(Prediction.placebo_prob.is_(None))
+            .where(Resolution.outcome.is_not(None))
+            .where(Resolution.is_void.is_(False))
+        )
+        if version:
+            incomplete_q = incomplete_q.where(Prediction.belief_set_version == version)
+        n_incomplete = int(s.execute(incomplete_q).scalar_one())
+    if n_incomplete:
+        rep.warnings.append(f"⚠ {n_incomplete} 条已结算行缺 placebo 臂（被剔出主总体，查 placebo 是否坏掉）")
+
+    # 次指标：vs 提交时市场价（同版本过滤，Codex 验收 F10）
+    with session_scope() as s:
+        mq = (
             select(Prediction.market_implied_prob, Resolution.outcome)
             .join(Resolution, Resolution.question_id == Prediction.question_id)
             .where(Prediction.gate_state.in_(("in_domain", "adjacent")))
             .where(Prediction.market_implied_prob.is_not(None))
             .where(Resolution.outcome.is_not(None))
             .where(Resolution.is_void.is_(False))
-        ).all()
+        )
+        if version:
+            mq = mq.where(Prediction.belief_set_version == version)
+        mrows = s.execute(mq).all()
     if mrows:
         rep.n_market = len(mrows)
         rep.brier_market = sum(brier(m, o) for m, o in mrows) / len(mrows)
