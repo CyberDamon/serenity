@@ -86,6 +86,18 @@ def _build_llms(models: list[str] | None = None) -> list[LLMClient]:
 # 非二元/梗题兜底（v1 仅二元题，评审定稿）。qtype=binary 过滤为主，这里只兜格式怪题。
 _NON_BINARY_RE = re.compile(r"\bhow (many|much)\b|\bwhich of\b", re.IGNORECASE)
 
+# 零成本梗题预过滤（QA ISSUE-001）：Yarrow open 题流被高频加密涨跌/价格阶梯刷屏
+# （15 分钟 "Up or Down"、"Bitcoin above 62,400 on July 10, 11AM ET" 之类），
+# 每条过 LLM 闸门要花钱且必然 out_of_domain。高精度正则先拦，可疑边界题仍走闸门。
+_MEME_MARKET_RE = re.compile(
+    r"""
+      \bup\s+or\s+down\b                                  # 15 分钟涨跌
+    | \babove\s+[\d,]+(\.\d+)?\s+on\s+\w+\s+\d+           # 价格阶梯 "above 62,400 on July 10"
+    | \b(over/under|total\s+(rounds|kills|maps))\b        # 体育/电竞盘口
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
 
 def run_daily(
     *,
@@ -154,36 +166,53 @@ def run_daily(
     vocab = load_gate_vocab(version)
 
     # ── ① 扫描 + 闸门 ──
+    # 按类别循环定向拉题（QA ISSUE-002）：Yarrow 无类别过滤的题流被体育/加密梗题
+    # 刷屏，全局扫描 max_scan 条几乎碰不到真题。settings.yarrow_categories 为逗号
+    # 列表时逐类别扫（扫描预算均分）；为空 = 全局扫（兜底）。
     recently_done = _recently_submitted(today, resubmit_window_days)
-    category = (settings.yarrow_categories.split(",")[0].strip() or None) if settings.yarrow_categories else None
+    categories: list[str | None] = (
+        [c.strip() for c in settings.yarrow_categories.split(",") if c.strip()]
+        if settings.yarrow_categories else [None]
+    )
+    per_cat_scan = max(10, max_scan // len(categories))
     candidates: list[tuple[YarrowQuestionDTO, GateResult]] = []
     out_pool: list[tuple[YarrowQuestionDTO, GateResult]] = []
     raw_seen = 0
-    for q in client.iter_questions(status="open", qtype="binary", category=category):
-        raw_seen += 1
-        if raw_seen > max_scan:
-            log.info("触达扫描上限 max_scan=%d，停止拉题", max_scan)
-            break
-        if q.id in recently_done:
-            continue
-        if _NON_BINARY_RE.search(q.title or ""):
-            _persist_minimal(q, today, "skipped", "non_binary_format", version, None, now)
-            result.skipped += 1
-            continue
-        gate = classify_question(
-            title=q.title, deadline=q.scheduled_resolve_time, vocab=vocab, llm=gate_llm
-        )
-        if gate.state == "out_of_domain":
-            result.gated_out += 1
-            out_pool.append((q, gate))
-            continue
-        if gate.state == "in_domain":
-            result.gated_in += 1
-        else:
-            result.gated_adjacent += 1
-        candidates.append((q, gate))
+    seen_ids: set[str] = set()
+    for category in categories:
+        cat_seen = 0
         if len(candidates) >= max_questions:
             break
+        for q in client.iter_questions(status="open", qtype="binary", category=category):
+            cat_seen += 1
+            raw_seen += 1
+            if cat_seen > per_cat_scan:
+                log.info("类别 %s 触达扫描上限 %d，换下一类别", category or "(all)", per_cat_scan)
+                break
+            if q.id in seen_ids or q.id in recently_done:
+                continue
+            seen_ids.add(q.id)
+            title = q.title or ""
+            if _MEME_MARKET_RE.search(title):
+                continue  # 零成本拦截，不落库不花钱（QA ISSUE-001）
+            if _NON_BINARY_RE.search(title):
+                _persist_minimal(q, today, "skipped", "non_binary_format", version, None, now)
+                result.skipped += 1
+                continue
+            gate = classify_question(
+                title=q.title, deadline=q.scheduled_resolve_time, vocab=vocab, llm=gate_llm
+            )
+            if gate.state == "out_of_domain":
+                result.gated_out += 1
+                out_pool.append((q, gate))
+                continue
+            if gate.state == "in_domain":
+                result.gated_in += 1
+            else:
+                result.gated_adjacent += 1
+            candidates.append((q, gate))
+            if len(candidates) >= max_questions:
+                break
     result.seen = raw_seen
 
     # out_of_domain：抽样 ≤N 条跑 generic shadow（闸门误判复盘）；其余只记闸门判定。

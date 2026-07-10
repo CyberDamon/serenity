@@ -308,3 +308,45 @@ def test_daily_rejects_nondefault_prior_scale(tmpdb, monkeypatch):
         run_daily(client=FakeYarrow([]), llms=[FrameworkFakeLLM("m1")],
                   gate_llm=GateFakeLLM(), prior_llm=PriorFakeLLM(),
                   self_check=None, calibrator=lambda p: p, research=False)
+
+
+def test_meme_market_prefilter_regex():
+    """QA ISSUE-001 回归：梗题零成本预过滤，真题不误杀。"""
+    from serenity.yarrow.runner import _MEME_MARKET_RE
+    # 必拦
+    assert _MEME_MARKET_RE.search("BNB Up or Down - July 10, 10:10AM-10:15AM ET")
+    assert _MEME_MARKET_RE.search("Bitcoin above 62,400 on July 10, 11AM ET?")
+    assert _MEME_MARKET_RE.search("Map 1 Total Rounds: Over/Under 20.5")
+    assert _MEME_MARKET_RE.search("Total Kills Over/Under 55.5 in Game 2?")
+    # 不误杀
+    assert not _MEME_MARKET_RE.search("Will NVDA announce a Blackwell successor at GTC 2026?")
+    assert not _MEME_MARKET_RE.search('Will Netflix say "AI" 5+ times during earnings call?')
+    assert not _MEME_MARKET_RE.search("Will TSMC raise capex guidance above $50B for 2027?")
+
+
+def test_daily_meme_questions_skipped_without_gate_cost(tmpdb):
+    """梗题在闸门之前被拦：不落库、不调 gate LLM（QA ISSUE-001）。"""
+
+    class CountingGateLLM(GateFakeLLM):
+        def __init__(self):
+            self.n = 0
+
+        def complete(self, **kw):
+            self.n += 1
+            return super().complete(**kw)
+
+    from serenity.yarrow.runner import run_daily
+
+    _seed_belief_version()
+    gate_llm = CountingGateLLM()
+    fake = FakeYarrow([_q("m1", "BNB Up or Down - July 10, 10:10AM-10:15AM ET"),
+                       _q("m2", "Bitcoin above 62,400 on July 10, 11AM ET?")])
+    res = run_daily(client=fake, llms=[FrameworkFakeLLM("m1"), FrameworkFakeLLM("m2")],
+                    gate_llm=gate_llm, prior_llm=PriorFakeLLM(),
+                    research=False, min_evidence=0, min_sources=0,
+                    self_check=None, calibrator=lambda p: p)
+    assert gate_llm.n == 0  # 零 LLM 成本
+    from serenity.store.dao import session_scope
+    from serenity.store.models import Prediction
+    with session_scope() as s:
+        assert s.query(Prediction).count() == 0  # 不落库
