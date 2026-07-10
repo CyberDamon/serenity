@@ -266,3 +266,16 @@ def test_evidence_quality_counts_recent_and_sources():
     recent, sources = _evidence_quality(news, now, max_age_days=30)
     assert recent == 3           # bbc(7-1)+ft(6-30)+brief；旧的和短摘要被剔
     assert sources == 2          # bbc, ft（brief 不计来源）
+
+
+def test_self_check_shift_clamped():
+    """QA ISSUE-004 回归：无证据复核层的修正幅度夹在 ±0.15（实测曾 0.20→0.55）。"""
+    check = make_self_check(SchemaFakeLLM(values={"revised_prob": 0.55, "note": "n"}))
+    pred = predict(
+        market=Market(token_id="t123456789", question=Q, market_price=0.25,
+                      resolution_date_iso="2026-12-31"),
+        news=[], llms=[SchemaFakeLLM(values={"prob": 0.2})], as_of_date=date(2026, 7, 1),
+        self_check=check,
+    )
+    assert abs(pred.raw_prob - 0.35) < 1e-9  # 0.2 + 0.15 夹住，而非 0.55
+    assert abs(pred.self_check_delta - 0.15) < 1e-9
