@@ -1,11 +1,11 @@
 {
-  "method": "platt",
-  "version": 1,
-  "platt_a": 68.55055911729988,
-  "platt_b": -0.4011267220476118,
+  "method": "identity",
+  "version": 0,
+  "platt_a": 1.0,
+  "platt_b": 0.0,
   "iso_x": [],
   "iso_y": [],
-  "n_train": 196,
-  "holdout_brier_identity": 0.24508673469387754,
-  "holdout_brier_model": 0.2363148384734798
+  "n_train": 315,
+  "holdout_brier_identity": 0.2454142857142857,
+  "holdout_brier_model": 0.5619036380962381
 }
