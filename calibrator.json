@@ -520,6 +520,6 @@
     0.47619047619047616
   ],
   "n_train": 256,
-  "holdout_brier_identity": 0.24623828125,
-  "holdout_brier_model": 0.24107142857144415
+  "holdout_brier_identity": 0.24626744186046512,
+  "holdout_brier_model": 0.24096046687410363
 }
