@@ -5,7 +5,7 @@
   "platt_b": 0.0,
   "iso_x": [],
   "iso_y": [],
-  "n_train": 458,
+  "n_train": 459,
   "holdout_brier_identity": 0.2468529411764706,
-  "holdout_brier_model": 0.30528483582783533
+  "holdout_brier_model": 0.2929700458144065
 }
